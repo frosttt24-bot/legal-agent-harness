@@ -20,8 +20,19 @@ EVENTS = (
     "final",
 )
 
+_EVENT_TRANSITIONS = {
+    None: ("task",),
+    "task": ("agent_answer",),
+    "agent_answer": ("validator_feedback",),
+    "validator_feedback": ("agent_answer", "expert_review"),
+    "expert_review": ("final",),
+    "final": (),
+}
+
 # Финальный вердикт всегда требует одобрения эксперта.
 FINAL_ALWAYS_NEEDS_EXPERT_APPROVAL = True
+
+_APPROVAL_FIELDS = ("approved", "expert_approved", "needs_expert_approval")
 
 DEFAULT_MAX_ROUNDS = 3
 
@@ -201,6 +212,13 @@ def validate_response(response: Any) -> Dict[str, Any]:
     expected = response.get("expected")
     if not isinstance(expected, dict):
         raise ResponseValidationError("ответ должен содержать объект expected")
+    approval_fields = [
+        name for name in _APPROVAL_FIELDS if name in response or name in expected
+    ]
+    if approval_fields:
+        raise ResponseValidationError(
+            f"ответ агента содержит поля одобрения: {', '.join(approval_fields)}"
+        )
     missing = [
         f
         for f in EXPECTED_REQUIRED_FIELDS
@@ -348,6 +366,18 @@ def build_agent_task(case: Dict[str, Any]) -> Dict[str, Any]:
     return copy.deepcopy({key: case[key] for key in AGENT_TASK_FIELDS})
 
 
+def _validate_event_order(events: Iterable[str]) -> None:
+    previous = None
+    for event in events:
+        if event not in _EVENT_TRANSITIONS[previous]:
+            raise HarnessError(
+                f"неверный порядок событий: {event!r} после {previous!r}"
+            )
+        previous = event
+    if previous != "final":
+        raise HarnessError("неверный порядок событий: отсутствует final")
+
+
 def run_case(
     case: Dict[str, Any],
     adapter: Any,
@@ -432,18 +462,19 @@ def run_case(
         0,
         {
             "status": status,
-            "needs_expert_approval": True,
+            "needs_expert_approval": FINAL_ALWAYS_NEEDS_EXPERT_APPROVAL,
             "attempts": attempts,
             "response": last_response,
         },
     )
+    _validate_event_order(ev.event for ev in events)
 
     return RunResult(
         case_id=case_id,
         status=status,
         rounds=attempts,
         approved=approved,
-        needs_expert_approval=True,
+        needs_expert_approval=FINAL_ALWAYS_NEEDS_EXPERT_APPROVAL,
         events=[ev.to_dict(redactor) for ev in events],
         # output печатается CLI и пишется в --out, поэтому чистится как события.
         output=redactor.scrub(last_response or {}),

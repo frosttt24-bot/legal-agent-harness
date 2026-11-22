@@ -17,6 +17,7 @@ if SRC not in sys.path:
 
 from legal_agent_harness import (  # noqa: E402
     CaseValidationError,
+    HarnessError,
     Redactor,
     build_agent_task,
     redact,
@@ -30,6 +31,7 @@ from legal_agent_harness.adapters import (  # noqa: E402
     ReplayAdapter,
     get_adapter,
 )
+from legal_agent_harness.core import _validate_event_order  # noqa: E402
 
 EXAMPLES = os.path.join(ROOT, "examples")
 
@@ -128,6 +130,49 @@ def test_final_always_needs_expert_approval():
     final = [e for e in result.events if e["event"] == "final"][0]
     assert final["payload"]["needs_expert_approval"] is True
     assert result.needs_expert_approval is True
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        ("validator_feedback", "final"),
+        ("expert_review", "validator_feedback", "final"),
+    ],
+)
+def test_event_order_rejects_missing_or_misplaced_expert_review(tail):
+    with pytest.raises(HarnessError, match="порядок событий"):
+        _validate_event_order(("task", "agent_answer", *tail))
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        {"status": "approved"},
+        {"approved": True},
+        {"expert_approved": True},
+        {"needs_expert_approval": False},
+        {"expected": {"expert_approved": True}},
+    ],
+)
+def test_agent_cannot_approve_its_own_answer(claim):
+    case = _case()
+    response = {"expected": dict(case["expected"])}
+    if "expected" in claim:
+        response["expected"].update(claim["expected"])
+    else:
+        response.update(claim)
+    adapter = ReplayAdapter({"case-001": {"response": response}})
+
+    result = run_case(case, adapter, max_rounds=1)
+
+    assert result.approved is False
+    assert result.status == "needs_expert_approval"
+    assert result.needs_expert_approval is True
+    assert result.events[2]["payload"]["ok"] is False
+    assert result.events[-2]["event"] == "expert_review"
+    assert result.events[-1]["payload"]["needs_expert_approval"] is True
+    assert result.events[-1]["payload"]["response"] is None
+    assert result.output == {}
 
 
 def test_redaction_of_tokens_and_emails():
